@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF - Komprimierung</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pdf-lib/dist/pdf-lib.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+    </script>
+    <script src="common.js"></script>
+    <link rel="shortcut icon" href="rsc/icon.png" type="image/png">
+</head>
+<body class="bg-light">
+    <main class="container py-5">
+        <div class="text-center mb-5">
+            <h1 class="mb-3">PDF-Komprimierung</h1>
+            <p class="lead">Laden Sie ein PDF hoch, um es zu komprimieren.</p>
+        </div>
+
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="card shadow-sm">
+                    <div class="modal-body text-center" style="padding: 20px;">
+                        <div style="border: 2px dashed #ccc; padding: 20px; cursor: pointer;" id="dropZone">
+                            Datei hierhin ziehen oder klicken, um Datei auszuwählen
+                            <input type="file" id="fileInput" accept="application/pdf" hidden>
+                        </div>
+                        <div id="compressionPreview" class="mt-3"></div>
+                    </div>
+                </div>
+                <div class="text-center mt-4">
+                    <button type="button" class="btn btn-primary" onclick="compressPDF()">Komprimieren</button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let loadedPdfDoc = null;
+        let originalFileName = '';
+        let originalFileSize = 0;
+
+        const updateCompressionPreview = (file) => {
+            const compressionPreview = document.getElementById('compressionPreview');
+            compressionPreview.innerHTML = `<p>Datei: <strong>${file.name}</strong></p>`;
+            originalFileName = file.name.replace(/\.pdf$/, '');
+            originalFileSize = file.size; // Save original file size
+            loadedPdfDoc = file;
+        };
+
+        document.getElementById('fileInput').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) updateCompressionPreview(file);
+        });
+
+        const dropZone = document.getElementById('dropZone');
+        dropZone.addEventListener('click', () => document.getElementById('fileInput').click());
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#007bff';
+        });
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.style.borderColor = '#ccc';
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#ccc';
+            const file = e.dataTransfer.files[0];
+            if (file) updateCompressionPreview(file);
+        });
+
+        const compressPDF = async () => {
+            if (!loadedPdfDoc) return alert('Bitte eine Datei auswählen!');
+
+            const originalFileBuffer = await loadedPdfDoc.arrayBuffer();
+            console.log(`Original file size: ${(originalFileBuffer.byteLength / 1024).toFixed(2)} KB`);
+
+            const pdfDoc = await PDFLib.PDFDocument.load(originalFileBuffer,{ ignoreEncryption: true });
+            const pages = pdfDoc.getPages();
+            const imageProcessingTasks = [];
+
+            for (const page of pages) {
+                const xObjectEntries = page.node.Resources?.XObject?.dict?.entries();
+                if (!xObjectEntries) continue;
+
+                for (const [key, ref] of xObjectEntries) {
+                    const xObject = pdfDoc.context.lookup(ref);
+                    if (!(xObject instanceof PDFLib.PDFRawStream)) continue;
+
+                    const originalImageBytes = xObject.contents;
+                    
+                    const compressedBytes = await compressJpegBytes(originalImageBytes, 20); // Quality in %
+
+                    if (compressedBytes) {
+                        const compressedImage = await pdfDoc.embedJpg(compressedBytes);
+                        page.node.Resources.set(key, compressedImage.ref);
+                    }
+                }
+            }
+
+            const compressedPdfBytes = await pdfDoc.save();
+            const compressedFileSize = compressedPdfBytes.byteLength;
+
+            console.log(`Compressed file size: ${(compressedFileSize / 1024 / 1024).toFixed(2)} KB`);
+
+            // Calculate compression percentage
+            const compressionRatio = ((1 - (compressedFileSize / originalFileSize)) * 100).toFixed(2);
+
+            sendToDownloadPage(
+                new Blob([compressedPdfBytes], { type: 'application/pdf' }),
+                `${originalFileName}_compressed.pdf`,
+                `-${compressionRatio}% (${(originalFileSize / 1024 / 1024).toFixed(2)}MB -> ${(compressedFileSize / 1024 / 1024).toFixed(2)}MB)`
+            );
+        };
+
+        // Function to compress image bytes without canvas
+        async function compressJpegBytes(imageBytes, quality) {
+            const squoosh = await import('https://unpkg.com/@squoosh/lib@latest');
+
+            const imagePool = new squoosh.ImagePool(navigator.hardwareConcurrency);
+            const image = imagePool.ingestImage(imageBytes);
+
+            await image.encode({
+                mozjpeg: { quality: quality }
+            });
+            const compressedImage = await image.encodedWith.mozjpeg;
+            return new Uint8Array(await compressedImage.binary);
+        }
+    </script>
+</body>
+</html>
